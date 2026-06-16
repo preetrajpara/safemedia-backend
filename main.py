@@ -1,8 +1,5 @@
-# main.py
-
 import logging
 import sys
-from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, File, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,32 +12,17 @@ from app.services.text_service import classify_text
 from app.services.image_service import classify_image
 from app.services.video_service import classify_video
 
-# ── Logging ────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
     stream=sys.stdout,
 )
 
-# ── Load all models ONCE at startup ────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    app.state.text_model = TextToxicityModel()
-    app.state.image_model = ImageNSFWModel()
-    app.state.video_model = VideoAnalysisModel()
-    yield
-    del app.state.text_model
-    del app.state.image_model
-    del app.state.video_model
-
-# ── App ────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="SafeMedia Moderation API",
     version="2.0.0",
-    lifespan=lifespan,
 )
 
-# CORS — allows Flutter to call this API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -48,51 +30,78 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Health ─────────────────────────────────────────────────────────────
+# ── Lazy model storage ─────────────────────────
+text_model = None
+image_model = None
+video_model = None
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "2.0.0"}
+    return {"status": "ok"}
 
-# ── Text endpoint ──────────────────────────────────────────────────────
+# ── TEXT ──────────────────────────────────────
 @app.post("/predict/text", response_model=TextResponse)
-def predict_text(payload: TextRequest, request: Request):
-    try:
-        return classify_text(payload.text, request.app.state.text_model)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception:
-        raise HTTPException(status_code=500, detail="Text inference failed.")
+def predict_text(payload: TextRequest):
+    global text_model
 
-# ── Image endpoint ─────────────────────────────────────────────────────
-@app.post("/predict/image", response_model=ImageResponse)
-async def predict_image(request: Request, file: UploadFile = File(...)):
     try:
+        if text_model is None:
+            print("Loading text model...")
+            text_model = TextToxicityModel()
+
+        return classify_text(payload.text, text_model)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ── IMAGE ─────────────────────────────────────
+@app.post("/predict/image", response_model=ImageResponse)
+async def predict_image(file: UploadFile = File(...)):
+    global image_model
+
+    try:
+        if image_model is None:
+            print("Loading image model...")
+            image_model = ImageNSFWModel()
+
         image_bytes = await file.read()
+
         return classify_image(
             image_bytes=image_bytes,
             filename=file.filename or "upload",
             content_type=file.content_type or "image/jpeg",
-            model=request.app.state.image_model,
+            model=image_model,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception:
-        raise HTTPException(status_code=500, detail="Image inference failed.")
 
-# ── Video endpoint ─────────────────────────────────────────────────────
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ── VIDEO ─────────────────────────────────────
 @app.post("/predict/video", response_model=VideoResponse)
-async def predict_video(request: Request, file: UploadFile = File(...)):
+async def predict_video(file: UploadFile = File(...)):
+    global video_model, image_model, text_model
+
     try:
+        if video_model is None:
+            print("Loading video model...")
+            video_model = VideoAnalysisModel()
+
+        if image_model is None:
+            image_model = ImageNSFWModel()
+
+        if text_model is None:
+            text_model = TextToxicityModel()
+
         video_bytes = await file.read()
+
         return classify_video(
             video_bytes=video_bytes,
             filename=file.filename or "upload",
             content_type=file.content_type or "video/mp4",
-            video_model=request.app.state.video_model,
-            image_model=request.app.state.image_model,
-            text_model=request.app.state.text_model,
+            video_model=video_model,
+            image_model=image_model,
+            text_model=text_model,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception:
-        raise HTTPException(status_code=500, detail="Video inference failed.")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

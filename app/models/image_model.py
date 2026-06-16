@@ -1,5 +1,3 @@
-# app/models/image_model.py
-
 import logging
 import io
 from PIL import Image
@@ -20,22 +18,43 @@ class ImageNSFWModel:
 
     def predict(self, image_bytes: bytes) -> dict:
         image = self._decode(image_bytes)
-        result = self._pipe(image)[0]
+
+        results = self._pipe(image)
+
+        # 🔥 pick highest score safely
+        best = max(results, key=lambda x: x["score"])
+
+        label = best["label"].lower()
+        score = float(best["score"])
+
+        # 🔥 normalize output
+        category = "nsfw" if label == "nsfw" else "safe"
+
+        # 🔥 confidence logic
+        if score > 0.85:
+            confidence = "high"
+        elif score > 0.65:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
         return {
-            "raw_label": result["label"].lower(),
-            "score": round(float(result["score"]), 4),
+            "label": category,
+            "raw_label": label,
+            "score": round(score, 4),
+            "confidence": confidence,
         }
 
     @staticmethod
     def _decode(image_bytes: bytes) -> Image.Image:
         try:
             img = Image.open(io.BytesIO(image_bytes))
-            img.verify()
-            img = Image.open(io.BytesIO(image_bytes))
         except Exception as e:
             raise ValueError(f"Invalid image: {e}")
 
         if img.format not in ALLOWED_FORMATS:
-            raise ValueError(f"Unsupported format '{img.format}'. Use JPEG, PNG, WEBP or BMP.")
+            raise ValueError(
+                f"Unsupported format '{img.format}'. Use JPEG, PNG, WEBP or BMP."
+            )
 
         return img.convert("RGB")
