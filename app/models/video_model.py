@@ -1,47 +1,41 @@
 import logging
-import os
-import uuid
-import tempfile
-import cv2
-import ffmpeg
+import io
 from PIL import Image
+from transformers import pipeline
 
 logger = logging.getLogger(__name__)
 
-# 🔥 reduce frame load
-MAX_FRAMES = 5
+ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP", "BMP"}
 
-class VideoAnalysisModel:
+class ImageNSFWModel:
     def __init__(self):
-        logger.info("Video model ready (light mode).")
+        logger.info("Loading lightweight NSFW model...")
+        self._pipe = pipeline(
+            task="image-classification",
+            model="Falconsai/nsfw_image_detection",
+            device=-1  # force CPU (important for Render)
+        )
+        logger.info("Image model ready.")
 
-    def extract_frames(self, video_path: str) -> list[Image.Image]:
-        frames = []
-        cap = cv2.VideoCapture(video_path)
+    def predict(self, image_bytes: bytes) -> dict:
+        image = self._decode(image_bytes)
+        result = self._pipe(image)[0]
 
-        if not cap.isOpened():
-            raise ValueError("Could not open video file.")
+        return {
+            "raw_label": result["label"].lower(),
+            "score": round(float(result["score"]), 4),
+        }
 
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        step = max(1, total_frames // MAX_FRAMES)
+    @staticmethod
+    def _decode(image_bytes: bytes) -> Image.Image:
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            img.verify()
+            img = Image.open(io.BytesIO(image_bytes))
+        except Exception as e:
+            raise ValueError(f"Invalid image: {e}")
 
-        frame_index = 0
+        if img.format not in ALLOWED_FORMATS:
+            raise ValueError(f"Unsupported format '{img.format}'.")
 
-        while len(frames) < MAX_FRAMES:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(Image.fromarray(rgb))
-
-            frame_index += step
-
-        cap.release()
-        logger.info(f"Extracted {len(frames)} frames.")
-        return frames
-
-    def extract_audio_transcript(self, video_path: str) -> str:
-        """⚠️ OPTIONAL — disable for now"""
-        return ""
+        return img.convert("RGB")
