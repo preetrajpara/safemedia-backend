@@ -1,139 +1,150 @@
-import logging
-import sys
-
-from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import shutil
+import os
+import cv2
 
-from app.models.text_model import TextToxicityModel
-from app.models.image_model import ImageNSFWModel
-from app.models.video_model import VideoAnalysisModel
+from transformers import pipeline
 
-from app.schemas import TextRequest, TextResponse, ImageResponse, VideoResponse
+app = FastAPI()
 
-from app.services.text_service import classify_text
-from app.services.image_service import classify_image
-from app.services.video_service import classify_video
-
-# ─────────────────────────────────────────────
-# Logging
-# ─────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    stream=sys.stdout,
-)
-
-# ─────────────────────────────────────────────
-# App Init
-# ─────────────────────────────────────────────
-app = FastAPI(
-    title="SafeMedia Moderation API",
-    version="2.0.0",
-)
-
-# ─────────────────────────────────────────────
-# CORS (for Flutter / frontend)
-# ─────────────────────────────────────────────
+# =========================
+# 🔥 CORS
+# =========================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ─────────────────────────────────────────────
-# Lazy-loaded models (IMPORTANT for Render)
-# ─────────────────────────────────────────────
-text_model = None
-image_model = None
-video_model = None
+# =========================
+# 🔥 REQUEST MODEL
+# =========================
+class TextRequest(BaseModel):
+    text: str
 
-# ─────────────────────────────────────────────
-# Root (fix 404)
-# ─────────────────────────────────────────────
-@app.get("/")
-def root():
-    return {"message": "SafeMedia API is running 🚀"}
+# =========================
+# 🔥 LOAD MODELS
+# =========================
+text_classifier = pipeline("text-classification", model="unitary/toxic-bert")
+image_classifier = pipeline("image-classification", model="Falconsai/nsfw_image_detection")
 
-# ─────────────────────────────────────────────
-# Health check
-# ─────────────────────────────────────────────
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+# =========================
+# 🔥 DECISION
+# =========================
+def get_decision(safe):
+    if safe >= 70:
+        return "Safe to Upload ✅"
+    elif safe >= 30:
+        return "Risky to Upload ⚠️"
+    else:
+        return "Not Allowed to Upload 🚫"
 
-# ─────────────────────────────────────────────
-# TEXT
-# ─────────────────────────────────────────────
-@app.post("/predict/text", response_model=TextResponse)
-def predict_text(payload: TextRequest):
-    global text_model
+# =========================
+# 🔥 TEXT API
+# =========================
+@app.post("/predict/text")
+async def predict_text(data: TextRequest):
+    result = text_classifier(data.text)[0]
 
-    try:
-        if text_model is None:
-            print("Loading text model...")
-            text_model = TextToxicityModel()
+    score = result["score"] * 100
+    label = result["label"].lower()
 
-        return classify_text(payload.text, text_model)
+    toxic = score if "toxic" in label else 100 - score
+    safe = 100 - toxic
 
-    except Exception as e:
-        print("TEXT ERROR:", str(e))
-        raise HTTPException(status_code=500, detail="Text processing failed")
+    return {
+        "type": "text",
+        "toxic": round(toxic, 2),
+        "safe": round(safe, 2),
+        "decision": get_decision(safe)
+    }
 
-# ─────────────────────────────────────────────
-# IMAGE
-# ─────────────────────────────────────────────
-@app.post("/predict/image", response_model=ImageResponse)
+# =========================
+# 🔥 IMAGE API
+# =========================
+@app.post("/predict/image")
 async def predict_image(file: UploadFile = File(...)):
-    global image_model
+    path = f"temp_{file.filename}"
 
-    try:
-        if image_model is None:
-            print("Loading image model...")
-            image_model = ImageNSFWModel()
+    with open(path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
-        image_bytes = await file.read()
+    results = image_classifier(path)
 
-        return classify_image(
-            image_bytes=image_bytes,
-            filename=file.filename or "upload",
-            content_type=file.content_type or "image/jpeg",
-            model=image_model,
-        )
+    toxic = 0
+    for r in results:
+        if "nsfw" in r["label"].lower():
+            toxic = r["score"] * 100
 
-    except Exception as e:
-        print("IMAGE ERROR:", str(e))
-        raise HTTPException(status_code=500, detail="Image processing failed")
+    safe = 100 - toxic
 
-# ─────────────────────────────────────────────
-# VIDEO (LIGHT MODE)
-# ─────────────────────────────────────────────
-@app.post("/predict/video", response_model=VideoResponse)
+    os.remove(path)
+
+    return {
+        "type": "image",
+        "toxic": round(toxic, 2),
+        "safe": round(safe, 2),
+        "decision": get_decision(safe)
+    }
+
+# =========================
+# 🔥 VIDEO API
+# =========================
+@app.post("/predict/video")
 async def predict_video(file: UploadFile = File(...)):
-    global video_model, image_model, text_model
+    path = f"temp_{file.filename}"
 
-    try:
-        if video_model is None:
-            print("Loading video model...")
-            video_model = VideoAnalysisModel()
+    with open(path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
-        if image_model is None:
-            image_model = ImageNSFWModel()
+    cap = cv2.VideoCapture(path)
 
-        if text_model is None:
-            text_model = TextToxicityModel()
+    scores = []
+    count = 0
 
-        video_bytes = await file.read()
+    while cap.isOpened() and count < 3:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-        return classify_video(
-            video_bytes=video_bytes,
-            filename=file.filename or "upload",
-            content_type=file.content_type or "video/mp4",
-            video_model=video_model,
-            image_model=image_model,
-            text_model=text_model,
-        )
+        temp = f"frame_{count}.jpg"
+        cv2.imwrite(temp, frame)
 
-    except Exception as e:
-        print("VIDEO ERROR:", str(e))
-        raise HTTPException(status_code=500, detail="Video processing failed")
+        results = image_classifier(temp)
+
+        toxic = 0
+        for r in results:
+            if "nsfw" in r["label"].lower():
+                toxic = r["score"] * 100
+
+        scores.append(toxic)
+
+        os.remove(temp)
+        count += 1
+
+    cap.release()
+    os.remove(path)
+
+    if not scores:
+        return {"error": "Video failed"}
+
+    avg_toxic = sum(scores) / len(scores)
+    avg_safe = 100 - avg_toxic
+
+    return {
+        "type": "video",
+        "toxic": round(avg_toxic, 2),
+        "safe": round(avg_safe, 2),
+        "decision": get_decision(avg_safe)
+    }
+
+# =========================
+# 🔥 ROOT
+# =========================
+@app.get("/")
+def home():
+    return {"message": "SafeMedia API running 🚀"}

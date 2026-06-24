@@ -1,41 +1,35 @@
-import logging
-import io
-from PIL import Image
-from transformers import pipeline
+# =========================
+# 🔥 VIDEO MODEL
+# =========================
+import cv2
+import os
 
-logger = logging.getLogger(__name__)
+def analyze_video(path):
+    cap = cv2.VideoCapture(path)
 
-ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP", "BMP"}
+    scores = []
+    count = 0
 
-class ImageNSFWModel:
-    def __init__(self):
-        logger.info("Loading lightweight NSFW model...")
-        self._pipe = pipeline(
-            task="image-classification",
-            model="Falconsai/nsfw_image_detection",
-            device=-1  # force CPU (important for Render)
-        )
-        logger.info("Image model ready.")
+    while cap.isOpened() and count < 3:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-    def predict(self, image_bytes: bytes) -> dict:
-        image = self._decode(image_bytes)
-        result = self._pipe(image)[0]
+        temp = f"frame_{count}.jpg"
+        cv2.imwrite(temp, frame)
 
-        return {
-            "raw_label": result["label"].lower(),
-            "score": round(float(result["score"]), 4),
-        }
+        toxic, _ = analyze_image(temp)
+        scores.append(toxic)
 
-    @staticmethod
-    def _decode(image_bytes: bytes) -> Image.Image:
-        try:
-            img = Image.open(io.BytesIO(image_bytes))
-            img.verify()
-            img = Image.open(io.BytesIO(image_bytes))
-        except Exception as e:
-            raise ValueError(f"Invalid image: {e}")
+        os.remove(temp)
+        count += 1
+ 
+    cap.release()
 
-        if img.format not in ALLOWED_FORMATS:
-            raise ValueError(f"Unsupported format '{img.format}'.")
+    if not scores:
+        return 0, 100
 
-        return img.convert("RGB")
+    avg_toxic = sum(scores) / len(scores)
+    avg_safe = 100 - avg_toxic
+
+    return round(avg_toxic, 2), round(avg_safe, 2)

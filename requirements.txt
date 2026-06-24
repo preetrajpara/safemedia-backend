@@ -3,14 +3,12 @@ uvicorn
 pydantic
 python-multipart
 
-transformers
-torch
-torchvision
-
 pillow
-opencv-python
+opencv-python-headless
 ffmpeg-python
 
 numpy
 requests
-tqdm
+
+transformers
+torch
